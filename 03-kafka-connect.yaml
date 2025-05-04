@@ -1,0 +1,147 @@
+---
+# ConfigMap for Kafka Connect configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-connect-config
+data:
+  connect-distributed.properties: |
+    bootstrap.servers=kafka-0.kafka-headless.default.svc.cluster.local:9092
+    group.id=connect-cluster
+    key.converter=org.apache.kafka.connect.json.JsonConverter
+    value.converter=org.apache.kafka.connect.json.JsonConverter
+    key.converter.schemas.enable=false
+    value.converter.schemas.enable=false
+    offset.storage.topic=connect-offsets
+    offset.storage.replication.factor=1
+    config.storage.topic=connect-configs
+    config.storage.replication.factor=1
+    status.storage.topic=connect-status
+    status.storage.replication.factor=1
+    offset.flush.interval.ms=10000
+    plugin.path=/opt/bitnami/kafka/plugins,/usr/share/java
+---
+# Kafka Connect Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-connect
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-connect
+  template:
+    metadata:
+      labels:
+        app: kafka-connect
+    spec:
+      initContainers:
+      - name: download-connectors
+        image: alpine:3.18
+        command:
+        - sh
+        - -c
+        - |
+          # Install necessary tools
+          apk add --no-cache curl unzip wget jq
+          
+          # Create necessary directories
+          mkdir -p /opt/connectors/jdbc/lib
+          cd /opt/connectors
+          
+          echo "Downloading JDBC connector from official sources..."
+          # Download the latest JDBC connector from Maven Central
+          wget https://packages.confluent.io/maven/io/confluent/kafka-connect-jdbc/10.7.0/kafka-connect-jdbc-10.7.0.jar -O jdbc/kafka-connect-jdbc.jar
+          
+          # Download all dependencies
+          echo "Downloading JDBC connector dependencies..."
+          wget https://repo1.maven.org/maven2/org/postgresql/postgresql/42.6.0/postgresql-42.6.0.jar -O jdbc/lib/postgresql-42.6.0.jar
+          wget https://repo1.maven.org/maven2/com/h2database/h2/2.2.220/h2-2.2.220.jar -O jdbc/lib/h2-2.2.220.jar
+          wget https://repo1.maven.org/maven2/com/zaxxer/HikariCP/5.0.1/HikariCP-5.0.1.jar -O jdbc/lib/HikariCP-5.0.1.jar
+          wget https://repo1.maven.org/maven2/io/confluent/common-utils/7.4.0/common-utils-7.4.0.jar -O jdbc/lib/common-utils-7.4.0.jar
+          wget https://repo1.maven.org/maven2/io/confluent/common-config/7.4.0/common-config-7.4.0.jar -O jdbc/lib/common-config-7.4.0.jar
+          
+          # Download MySQL JDBC driver
+          echo "Downloading MySQL JDBC driver..."
+          wget https://dev.mysql.com/get/Downloads/Connector-J/mysql-connector-j-8.0.32.tar.gz -O mysql-connector.tar.gz
+          
+          if [ $? -eq 0 ]; then
+            echo "Extracting MySQL connector..."
+            tar -xzf mysql-connector.tar.gz
+            cp mysql-connector-j-8.0.32/mysql-connector-j-8.0.32.jar jdbc/lib/
+            echo "MySQL driver copied successfully"
+          else
+            echo "Failed to download MySQL connector"
+            exit 1
+          fi
+          
+          # Create a manifest file to help with debugging
+          echo "Creating manifest file..."
+          {
+            echo "JDBC Connector Files:"
+            find /opt/connectors -type f -name "*.jar" | sort
+          } > /opt/connectors/manifest.txt
+          
+          # List directory structure for debugging
+          echo "Final directory structure:"
+          find /opt/connectors -type f | sort
+        volumeMounts:
+        - name: connectors
+          mountPath: /opt/connectors
+      containers:
+      - name: kafka-connect
+        image: bitnami/kafka:3.5.1
+        ports:
+        - containerPort: 8083
+        command:
+        - sh
+        - -c
+        - |
+          echo "Preparing Kafka Connect environment..."
+          
+          # Create plugins directory structure
+          mkdir -p /opt/bitnami/kafka/plugins/kafka-connect-jdbc/lib
+          
+          # Copy the connector files to the plugin path directory
+          echo "Copying connector files to plugin path..."
+          cp /opt/connectors/jdbc/kafka-connect-jdbc.jar /opt/bitnami/kafka/plugins/kafka-connect-jdbc/
+          cp /opt/connectors/jdbc/lib/*.jar /opt/bitnami/kafka/plugins/kafka-connect-jdbc/lib/
+          
+          # Show what we've copied for debugging
+          echo "Connector files in plugin directory:"
+          find /opt/bitnami/kafka/plugins -type f | sort
+          
+          # Display the manifest of available connectors
+          cat /opt/connectors/manifest.txt
+          
+          # Start Kafka Connect
+          echo "Starting Kafka Connect..."
+          export CLASSPATH=$CLASSPATH:/opt/bitnami/kafka/plugins/*:/opt/bitnami/kafka/plugins/kafka-connect-jdbc/*:/opt/bitnami/kafka/plugins/kafka-connect-jdbc/lib/*
+          /opt/bitnami/kafka/bin/connect-distributed.sh /opt/bitnami/kafka/config/connect-distributed.properties
+        volumeMounts:
+        - name: config
+          mountPath: /opt/bitnami/kafka/config/connect-distributed.properties
+          subPath: connect-distributed.properties
+        - name: connectors
+          mountPath: /opt/connectors
+      volumes:
+      - name: config
+        configMap:
+          name: kafka-connect-config
+      - name: connectors
+        emptyDir: {}
+---
+# Kafka Connect Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-connect
+spec:
+  type: NodePort
+  ports:
+  - port: 8083
+    targetPort: 8083
+    nodePort: 30083
+  selector:
+    app: kafka-connect

@@ -1,0 +1,18 @@
+{
+  "name": "mysql-sink",
+  "config": {
+    "connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector",
+    "tasks.max": "1",
+    "topics": "mysql-sink-topic",
+    "connection.url": "jdbc:mysql://mysql:3306/kafka_connect_db",
+    "connection.user": "root",
+    "connection.password": "password",
+    "insert.mode": "insert",
+    "auto.create": "true",
+    "pk.mode": "record_value",
+    "pk.fields": "id",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "true",
+	"key.converter.schemas.enable": "true"
+  }
+}

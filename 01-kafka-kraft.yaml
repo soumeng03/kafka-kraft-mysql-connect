@@ -1,0 +1,195 @@
+---
+# Kafka Service for internal communication
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  labels:
+    app: kafka
+spec:
+  ports:
+  - port: 9092
+    name: kafka
+  - port: 9093
+    name: controller
+  clusterIP: None
+  selector:
+    app: kafka
+---
+# Kafka Service for external access (accessible from minikube)
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  labels:
+    app: kafka
+spec:
+  type: NodePort
+  ports:
+  - port: 9092
+    targetPort: 9092
+    nodePort: 30092
+    name: kafka
+  selector:
+    app: kafka
+---
+# Kafka StatefulSet for KRaft mode (simplified for minikube with single node)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+spec:
+  selector:
+    matchLabels:
+      app: kafka
+  serviceName: kafka-headless
+  replicas: 1
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      terminationGracePeriodSeconds: 30
+      initContainers:
+      - name: kafka-init
+        image: bitnami/kafka:3.5.1
+        command:
+        - bash
+        - -c
+        - |
+          # Generate cluster ID for KRaft mode if not exists
+          [ ! -f /var/lib/kafka/data/meta.properties ] && /opt/bitnami/kafka/bin/kafka-storage.sh random-uuid > /var/lib/kafka/data/cluster-id
+          # Format the storage with server.properties created from template
+          CLUSTER_ID=$(cat /var/lib/kafka/data/cluster-id)
+          KAFKA_BROKER_ID=0
+          CONTROLLER_QUORUM_VOTERS="0@kafka-0.kafka-headless.default.svc.cluster.local:9093"
+          
+          # Create server.properties from template with actual values
+          cat > /tmp/server.properties <<EOF
+          # Basic Kafka configuration
+          broker.id=$KAFKA_BROKER_ID
+          listeners=PLAINTEXT://:9092,CONTROLLER://:9093,INTERNAL://:9094
+          advertised.listeners=PLAINTEXT://kafka-$KAFKA_BROKER_ID.kafka-headless.default.svc.cluster.local:9092,INTERNAL://kafka-$KAFKA_BROKER_ID.kafka-headless.default.svc.cluster.local:9094
+          inter.broker.listener.name=INTERNAL
+          listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+          
+          # KRaft specific configuration
+          process.roles=broker,controller
+          controller.quorum.voters=$CONTROLLER_QUORUM_VOTERS
+          controller.listener.names=CONTROLLER
+          node.id=$KAFKA_BROKER_ID
+          
+          # Storage configuration
+          log.dirs=/var/lib/kafka/data
+          
+          # Basic broker configuration
+          num.network.threads=3
+          num.io.threads=8
+          socket.send.buffer.bytes=102400
+          socket.receive.buffer.bytes=102400
+          socket.request.max.bytes=104857600
+          num.partitions=1
+          num.recovery.threads.per.data.dir=1
+          offsets.topic.replication.factor=1
+          transaction.state.log.replication.factor=1
+          transaction.state.log.min.isr=1
+          default.replication.factor=1
+          min.insync.replicas=1
+          
+          # Log retention configuration
+          log.retention.hours=168
+          log.segment.bytes=1073741824
+          log.retention.check.interval.ms=300000
+          
+          # Cluster configuration
+          group.initial.rebalance.delay.ms=0
+          auto.create.topics.enable=true
+          EOF
+          
+          # Use the generated config file for formatting
+          /opt/bitnami/kafka/bin/kafka-storage.sh format -t $CLUSTER_ID -c /tmp/server.properties
+        volumeMounts:
+        - name: kafka-data
+          mountPath: /var/lib/kafka/data
+      containers:
+      - name: kafka
+        image: bitnami/kafka:3.5.1
+        ports:
+        - containerPort: 9092
+          name: kafka
+        - containerPort: 9093
+          name: controller
+        - containerPort: 9094
+          name: internal
+        command:
+        - bash
+        - -c
+        - |
+          # Create server.properties with actual values
+          KAFKA_BROKER_ID=0
+          CONTROLLER_QUORUM_VOTERS="0@kafka-0.kafka-headless.default.svc.cluster.local:9093"
+          
+          cat > /opt/bitnami/kafka/config/server.properties <<EOF
+          # Basic Kafka configuration
+          broker.id=$KAFKA_BROKER_ID
+          listeners=PLAINTEXT://:9092,CONTROLLER://:9093,INTERNAL://:9094
+          advertised.listeners=PLAINTEXT://kafka-$KAFKA_BROKER_ID.kafka-headless.default.svc.cluster.local:9092,INTERNAL://kafka-$KAFKA_BROKER_ID.kafka-headless.default.svc.cluster.local:9094
+          inter.broker.listener.name=INTERNAL
+          listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+          
+          # KRaft specific configuration
+          process.roles=broker,controller
+          controller.quorum.voters=$CONTROLLER_QUORUM_VOTERS
+          controller.listener.names=CONTROLLER
+          node.id=$KAFKA_BROKER_ID
+          
+          # Storage configuration
+          log.dirs=/var/lib/kafka/data
+          
+          # Basic broker configuration
+          num.network.threads=3
+          num.io.threads=8
+          socket.send.buffer.bytes=102400
+          socket.receive.buffer.bytes=102400
+          socket.request.max.bytes=104857600
+          num.partitions=1
+          num.recovery.threads.per.data.dir=1
+          offsets.topic.replication.factor=1
+          transaction.state.log.replication.factor=1
+          transaction.state.log.min.isr=1
+          default.replication.factor=1
+          min.insync.replicas=1
+          
+          # Log retention configuration
+          log.retention.hours=168
+          log.segment.bytes=1073741824
+          log.retention.check.interval.ms=300000
+          
+          # Cluster configuration
+          group.initial.rebalance.delay.ms=0
+          auto.create.topics.enable=true
+          EOF
+          
+          # Start Kafka
+          exec /opt/bitnami/kafka/bin/kafka-server-start.sh /opt/bitnami/kafka/config/server.properties
+        volumeMounts:
+        - name: kafka-data
+          mountPath: /var/lib/kafka/data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+  volumeClaimTemplates:
+  - metadata:
+      name: kafka-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi
